@@ -144,7 +144,7 @@ button { font-family:var(--ui); touch-action:manipulation; cursor:pointer; }
   <div id="bChoices"></div>
   <div id="bFeedback"></div>
   <div id="bActions">
-    <button id="btnHelp" class="act">🐻 Miles, help!</button>
+    <button id="btnHelp" class="act">🐻‍❄️ Miles, help!</button>
     <button id="btnRun" class="act run">🏃 Run</button>
     <button id="btnGo" class="act go hidden">Got it! ▶</button>
   </div>
@@ -665,32 +665,76 @@ function sfx(name) {
 }
 
 // =====================================================================
-// Rendering setup (low-res buffer, scaled up for crisp pixels)
+// Rendering setup: game logic uses 16-unit tiles; art is drawn at RES× detail
 // =====================================================================
+const RES = 2;
 const canvas = $('game'), ctx = canvas.getContext('2d');
 const buf = document.createElement('canvas'), bctx = buf.getContext('2d');
-let DPR = 1, SCALE = 4, BW = 256, BH = 176;
+let DPR = 1, SCALE = 4, BW = 256, BH = 176;   // BW/BH: view size in world units
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 3);
   canvas.width = Math.round(innerWidth * DPR); canvas.height = Math.round(innerHeight * DPR);
   const portrait = innerHeight > innerWidth;
-  SCALE = Math.max(1, Math.min(canvas.height / (16 * (portrait ? 14 : 11)), canvas.width / (16 * (portrait ? 10 : 12))));
-  BW = Math.ceil(canvas.width / SCALE); BH = Math.ceil(canvas.height / SCALE);
-  buf.width = BW; buf.height = BH;
+  const worldScale = Math.max(0.5, Math.min(canvas.height / (16 * (portrait ? 17 : 14)), canvas.width / (16 * (portrait ? 11 : 16))));
+  SCALE = worldScale / RES;
+  buf.width = Math.ceil(canvas.width / SCALE); buf.height = Math.ceil(canvas.height / SCALE);
+  BW = buf.width / RES; BH = buf.height / RES;
   bctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
 }
 addEventListener('resize', resize);
 resize();
 const newC = (w = 16, h = 16) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+const snap = v => Math.round(v * RES) / RES;
 
 // =====================================================================
-// Pixel sprites
+// Art helpers (crisp pixel shapes + automatic outlines)
+// =====================================================================
+function rectf(g, c, x, y, w, h) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); }
+function disc(g, c, cx, cy, rx, ry = rx) {
+  g.fillStyle = c;
+  for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) {
+    const dy = (y + 0.5 - cy) / ry; if (Math.abs(dy) > 1) continue;
+    const hw = rx * Math.sqrt(1 - dy * dy), x0 = Math.round(cx - hw), x1 = Math.round(cx + hw);
+    if (x1 > x0) g.fillRect(x0, y, x1 - x0, 1);
+  }
+}
+function outlineC(c, color) {
+  const g = c.getContext('2d'), w = c.width, h = c.height, img = g.getImageData(0, 0, w, h), s = img.data, o = new Uint8ClampedArray(s);
+  const n = parseInt(color.slice(1), 16), r = n >> 16, gg = (n >> 8) & 255, b = n & 255;
+  const A = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? s[(y * w + x) * 4 + 3] : 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4; if (s[i + 3] >= 128) continue;
+    if (A(x - 1, y) >= 128 || A(x + 1, y) >= 128 || A(x, y - 1) >= 128 || A(x, y + 1) >= 128) { o[i] = r; o[i + 1] = gg; o[i + 2] = b; o[i + 3] = 255; }
+  }
+  img.data.set(o); g.putImageData(img, 0, 0);
+  return c;
+}
+// Scale2x (EPX) upscaling: smooths diagonals of hand-made pixel art
+function scale2x(src) {
+  const w = src.width, h = src.height, s = new Uint32Array(src.getContext('2d').getImageData(0, 0, w, h).data.buffer);
+  const c = newC(w * 2, h * 2), g = c.getContext('2d'), od = g.createImageData(w * 2, h * 2), o = new Uint32Array(od.data.buffer);
+  const P = (x, y) => s[clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1)];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const E = P(x, y), B = P(x, y - 1), D = P(x - 1, y), F = P(x + 1, y), Hh = P(x, y + 1);
+    let e0 = E, e1 = E, e2 = E, e3 = E;
+    if (B !== Hh && D !== F) { if (D === B) e0 = D; if (B === F) e1 = F; if (D === Hh) e2 = D; if (Hh === F) e3 = F; }
+    const i = (2 * y) * (2 * w) + 2 * x;
+    o[i] = e0; o[i + 1] = e1; o[i + 2 * w] = e2; o[i + 2 * w + 1] = e3;
+  }
+  g.putImageData(od, 0, 0);
+  return c;
+}
+
+// =====================================================================
+// Sprites
 // =====================================================================
 function mkSprite(rows, pal) {
   const c = newC(16, rows.length), g = c.getContext('2d');
   rows.forEach((row, y) => { for (let x = 0; x < 16; x++) { const ch = row[x]; if (ch && ch !== '.' && pal[ch]) { g.fillStyle = pal[ch]; g.fillRect(x, y, 1, 1); } } });
-  return c;
+  return scale2x(c);
 }
+const hiCache = new Map();
+function hi(s) { let h = hiCache.get(s); if (!h) { h = scale2x(s); hiCache.set(s, h); } return h; }
 const tintCache = new Map();
 function tinted(spr, color) {
   let m = tintCache.get(spr); if (!m) { m = {}; tintCache.set(spr, m); }
@@ -700,46 +744,101 @@ function tinted(spr, color) {
   return (m[color] = c);
 }
 function drawSpr(g, s, x, y, flip = false, sc = 1) {
-  const w = s.width * sc, h = s.height * sc;
-  if (flip) { g.save(); g.translate(Math.round(x) + w, Math.round(y)); g.scale(-1, 1); g.drawImage(s, 0, 0, w, h); g.restore(); }
-  else g.drawImage(s, Math.round(x), Math.round(y), w, h);
+  const w = s.width / RES * sc, h = s.height / RES * sc;
+  x = snap(x); y = snap(y);
+  if (flip) { g.save(); g.translate(x + w, y); g.scale(-1, 1); g.drawImage(s, 0, 0, w, h); g.restore(); }
+  else g.drawImage(s, x, y, w, h);
 }
 
-const GIRL_BODY = {
-  down: ["......kbbk......", ".....kbwbbk.....", "...kkhhbbhhkk...", "..khhHhhhhhHhk..", "..khsssssssshk..", "..khsesssseshk..", "..khcsssssschk..",
-         "...khssmmsshk...", "...khkddddkhk...", "...kddwddwddk...", "..ksdddddddDsk..", "...kDddddddDk...", "..kDDddddddDDk..", "..kkkkkkkkkkkk.."],
-  up:   ["......kbbk......", ".....kbwbbk.....", "...kkhhbbhhkk...", "..khhHhhhhhHhk..", "..khhhhhhhhhhk..", "..khhhhhhhhhhk..", "..khhhHhhHhhhk..",
-         "...khhhhhhhhk...", "...khkddddkhk...", "...kddddddddk...", "..ksdddddddDsk..", "...kDddddddDk...", "..kDDddddddDDk..", "..kkkkkkkkkkkk.."],
-  side: [".....kbbk.......", "....kbwbbk......", "...kkhbbhhkk....", "..khhHhhhhhhk...", "..khhhhhhsssk...", "..khhhhhssesk...", "..khhhhhsscsk...",
-         "..khhhhhhssk....", "...khhkddk......", "....kddddddk....", "....kddsdddk....", "....kDdsdddk....", "...kDDddddDDk...", "...kkkkkkkkkk..."],
+const GP = {
+  girl: { o: '#2b1b17', h: '#7a3f1d', hl: '#a8602e', hd: '#5a2c12', s: '#f8cfa6', e: '#2a1a30', ch: '#ff9d9d', m: '#c0504d', d: '#ff7ebd', dd: '#d94f94', dl: '#ffb0d6', b: '#ff4f9a', bl: '#ffa0c8', sh: '#5a3a2a' },
+  mom: { o: '#2b1b17', h: '#d9a441', hl: '#f3cf70', hd: '#b07e28', s: '#f8cfa6', e: '#2a1a30', ch: '#ff9d9d', m: '#c0504d', d: '#7fb3ff', dd: '#4f7fd9', dl: '#b0d2ff', b: '#6a5acd', bl: '#a99cf0', sh: '#4a3a5a' },
 };
-const GIRL_LEGS = {
-  fb: [[".....ss..ss.....", ".....ll..ll....."], [".....ss..ss.....", ".....ll........."], [".....ss..ss.....", ".........ll....."]],
-  side: [["......ss........", "......lll......."], [".....s..s.......", "....ll...ll....."], ["......ss........", ".....lll........"]],
-};
-const BEAR_BODY = {
-  down: ["................", "...kk......kk...", "..kfpk....kpfk..", "..kffkkkkkkffk..", "..kffffffffffk..", ".kffeffffffeffk.", ".kffffmmmmffffk.",
-         ".kfffmmnnmmfffk.", "..kfffmmmmfffk..", "...krrrrrrrrk...", "..kffrfffffffk..", ".kffkfmmmmfkffk.", ".kffkfmmmmfkffk.", "..kkkffffffkkk.."],
-  up:   ["................", "...kk......kk...", "..kffk....kffk..", "..kffkkkkkkffk..", "..kffffffffffk..", ".kffffffffffffk.", ".kffffffffffffk.",
-         ".kffffffffffffk.", "..kffffffffffk..", "...krrrrrrrrk...", "..kffffffffffk..", ".kffkffffffkffk.", ".kffkffffffkffk.", "..kkkffFFffkkk.."],
-  side: ["................", "....kk..........", "...kfpk.........", "...kffkkkkk.....", "..kffffffffk....", "..kfffffffefk...", "..kfffffffmmmk..",
-         "..kffffffmmmnk..", "...kffffffmmk...", "...kkrrrrrrk....", "..kfffrfffffk...", "..kfffffkfmk....", "..kfffffkfmk....", "..kkkffffffk...."],
-};
-const BEAR_LEGS = {
-  fb: [["...kffk..kffk...", "...kkkk..kkkk..."], ["...kffk..kffk...", "...kkkk...kk...."], ["...kffk..kffk...", "....kk...kkkk..."]],
-  side: [["....kffk.kffk...", "....kkkk.kkkk..."], ["...kffk...kffk..", "...kkkk...kkkk.."], ["....kffk.kffk...", "....kkkk.kkkk..."]],
-};
-const PAL = {
-  girl: { k: '#2b1b17', h: '#7a3f1d', H: '#a35a2c', b: '#ff4f9a', w: '#ffffff', s: '#f8cfa6', e: '#1a1020', c: '#ff9d9d', m: '#c0504d', d: '#ff7ebd', D: '#d94f94', l: '#5a3a2a' },
-  mom:  { k: '#2b1b17', h: '#d9a441', H: '#f3cf70', b: '#6a5acd', w: '#ffffff', s: '#f8cfa6', e: '#1a1020', c: '#ff9d9d', m: '#c0504d', d: '#7fb3ff', D: '#4f7fd9', l: '#5a3a2a' },
-  bear: { k: '#2b1b17', f: '#b07034', F: '#7d4a1e', m: '#f0d0a0', n: '#1a1010', e: '#1a1010', r: '#e63946', p: '#f0a0a0' },
-};
-function charFrames(body, legs, pal) {
-  return { down: legs.fb.map(l => mkSprite(body.down.concat(l), pal)), up: legs.fb.map(l => mkSprite(body.up.concat(l), pal)), side: legs.side.map(l => mkSprite(body.side.concat(l), pal)) };
+function drawGirl(dir, f, p) {
+  const c = newC(32, 32), g = c.getContext('2d'), side = dir === 'side';
+  if (side) {
+    if (f === 1) { rectf(g, p.s, 12, 26, 2, 3); rectf(g, p.sh, 11, 28, 4, 2); rectf(g, p.s, 18, 26, 2, 3); rectf(g, p.sh, 18, 28, 4, 2); }
+    else { rectf(g, p.s, 15, 26, 3, 3); rectf(g, p.sh, 15, 29, 5, 2); }
+  } else {
+    const lu = f === 1 ? 1 : 0, ru = f === 2 ? 1 : 0;
+    rectf(g, p.s, 13, 26, 2, 4 - lu); rectf(g, p.sh, 12, 29 - lu, 3, 2);
+    rectf(g, p.s, 17, 26, 2, 4 - ru); rectf(g, p.sh, 17, 29 - ru, 3, 2);
+  }
+  for (let y = 19; y <= 27; y++) {
+    const hw = (side ? 3.5 : 4) + (y - 19) * (side ? 0.5 : 0.55), x0 = Math.round(16 - hw), w = Math.round(hw * 2);
+    if (y === 27) { rectf(g, '#ffffff', x0, y, w, 1); continue; }
+    rectf(g, p.d, x0, y, w, 1); rectf(g, p.dd, x0 + Math.round(w * 0.68), y, w - Math.round(w * 0.68), 1); rectf(g, p.dl, x0 + 1, y, 1, 1);
+  }
+  const sw = f === 1 ? 1 : f === 2 ? -1 : 0;
+  if (side) { rectf(g, p.s, 16 + sw * 2, 21, 2, 5); rectf(g, p.d, 15 + sw * 2, 19, 3, 3); }
+  else {
+    rectf(g, p.s, 9, 21 + sw, 2, 4); rectf(g, p.d, 9, 19, 3, 3); rectf(g, p.s, 21, 21 - sw, 2, 4); rectf(g, p.dd, 20, 19, 3, 3);
+    if (dir === 'down') { rectf(g, '#ffffff', 13, 19, 6, 1); rectf(g, '#ffffff', 16, 22, 1, 1); rectf(g, '#ffffff', 16, 24, 1, 1); }
+  }
+  if (dir === 'down') {
+    disc(g, p.h, 16, 11, 9, 8.5); rectf(g, p.h, 7, 11, 3, 9); rectf(g, p.h, 22, 11, 3, 9);
+    rectf(g, p.hd, 7, 18, 3, 2); rectf(g, p.hd, 22, 18, 3, 2);
+    disc(g, p.s, 16, 13.5, 6.5, 6);
+    disc(g, p.h, 16, 8.5, 8, 4.5); rectf(g, p.h, 10, 11, 3, 2); rectf(g, p.h, 15, 11, 2, 2); rectf(g, p.h, 19, 11, 3, 1);
+    rectf(g, p.hl, 11, 5, 5, 1); rectf(g, p.hl, 10, 6, 2, 1); rectf(g, p.hl, 18, 5, 3, 1);
+    rectf(g, p.e, 12, 14, 2, 3); rectf(g, p.e, 18, 14, 2, 3); rectf(g, '#ffffff', 12, 14, 1, 1); rectf(g, '#ffffff', 18, 14, 1, 1);
+    rectf(g, p.ch, 10, 17, 2, 1); rectf(g, p.ch, 20, 17, 2, 1); rectf(g, p.m, 15, 18, 2, 1);
+  } else if (dir === 'up') {
+    disc(g, p.h, 16, 11, 9, 8.5); rectf(g, p.h, 7, 11, 3, 9); rectf(g, p.h, 22, 11, 3, 9); disc(g, p.h, 16, 14, 7.5, 6.5);
+    rectf(g, p.hd, 12, 17, 8, 2); disc(g, p.hd, 16, 19, 3, 1.5);
+    rectf(g, p.hl, 11, 5, 5, 1); rectf(g, p.hl, 10, 6, 2, 1); rectf(g, p.hl, 18, 5, 3, 1); rectf(g, p.hd, 16, 4, 1, 11);
+  } else {
+    disc(g, p.h, 15, 11, 8.5, 8.5); rectf(g, p.h, 7, 11, 5, 9); rectf(g, p.hd, 7, 18, 5, 2);
+    disc(g, p.s, 18.5, 13.5, 6, 6);
+    disc(g, p.h, 15.5, 8.5, 8, 4.5); rectf(g, p.h, 19, 11, 4, 1); rectf(g, p.h, 10, 11, 7, 4);
+    rectf(g, p.hl, 11, 5, 5, 1); rectf(g, p.hl, 10, 6, 2, 1);
+    rectf(g, p.e, 21, 14, 2, 3); rectf(g, '#ffffff', 21, 14, 1, 1); rectf(g, p.ch, 21, 17, 2, 1); rectf(g, p.m, 23, 18, 1, 1);
+  }
+  const bx = side ? 10 : 22;
+  disc(g, p.b, bx - 2.5, 4.5, 2.4, 2); disc(g, p.b, bx + 2.5, 4.5, 2.4, 2);
+  rectf(g, p.bl, bx - 4, 3, 2, 1); rectf(g, p.bl, bx + 1, 3, 2, 1); rectf(g, p.dd, bx - 1, 3, 2, 3);
+  return outlineC(c, p.o);
 }
-const GIRL = charFrames(GIRL_BODY, GIRL_LEGS, PAL.girl);
-const MOM = charFrames(GIRL_BODY, GIRL_LEGS, PAL.mom);
-const BEAR = charFrames(BEAR_BODY, BEAR_LEGS, PAL.bear);
+
+const BP = { o: '#3a4658', f: '#f6f8fb', s: '#d6dee9', d: '#b6c2d2', l: '#ffffff', m: '#ece4d6', n: '#1c1c26', r: '#e63946', rd: '#b02a36' };
+function drawPolarBear(dir, f) {
+  const p = BP, c = newC(32, 32), g = c.getContext('2d'), a = f === 1 ? 1 : f === 2 ? -1 : 0;
+  if (dir === 'down') {
+    disc(g, p.s, 16, 14, 10, 6.5); disc(g, p.f, 15.5, 13, 9, 5.5);
+    const leg = (x, up) => { rectf(g, p.s, x, 22 - up, 6, 8); rectf(g, p.f, x, 22 - up, 4, 7); rectf(g, p.l, x, 28 - up, 5, 2); rectf(g, p.d, x + 2, 29 - up, 1, 1); rectf(g, p.d, x + 4, 29 - up, 1, 1); };
+    leg(8, a > 0 ? 1 : 0); leg(18, a < 0 ? 1 : 0);
+    disc(g, p.f, 10, 13.5, 2.6); disc(g, p.f, 22, 13.5, 2.6); disc(g, p.d, 10, 13.5, 1.2); disc(g, p.d, 22, 13.5, 1.2);
+    disc(g, p.s, 16.5, 19.5, 8, 6.5); disc(g, p.f, 15.8, 18.8, 7.5, 6);
+    disc(g, p.m, 16, 22, 4.2, 2.8);
+    rectf(g, p.n, 14, 19, 4, 2); rectf(g, '#5a5a6a', 15, 19, 1, 1); rectf(g, p.d, 16, 21, 1, 1);
+    rectf(g, p.n, 12, 16, 2, 2); rectf(g, p.n, 19, 16, 2, 2); rectf(g, '#ffffff', 12, 16, 1, 1); rectf(g, '#ffffff', 19, 16, 1, 1);
+    rectf(g, p.r, 10, 25, 12, 2); rectf(g, p.rd, 10, 26, 12, 1); rectf(g, p.r, 19, 26, 3, 3); rectf(g, p.rd, 21, 26, 1, 3);
+  } else if (dir === 'side') {
+    rectf(g, p.d, 8 - a, 22, 4, 7); rectf(g, p.d, 19 + a, 22, 4, 7);
+    disc(g, p.s, 14, 18, 10.5, 6.5); disc(g, p.f, 13.5, 17, 9.5, 5.2); disc(g, p.l, 11, 14.5, 4, 1.5);
+    disc(g, p.f, 3.5, 16, 2, 2);
+    rectf(g, p.s, 10 + a, 22, 5, 8); rectf(g, p.f, 10 + a, 22, 4, 7); rectf(g, p.l, 10 + a, 28, 5, 2);
+    rectf(g, p.s, 20 - a, 22, 5, 8); rectf(g, p.f, 20 - a, 22, 4, 7); rectf(g, p.l, 20 - a, 28, 5, 2);
+    rectf(g, p.r, 17, 11, 3, 10); rectf(g, p.rd, 19, 11, 1, 10); rectf(g, p.r, 13, 14, 4, 2); rectf(g, p.rd, 13, 15, 4, 1);
+    disc(g, p.f, 20, 10, 2.2); disc(g, p.d, 20, 10, 1);
+    disc(g, p.s, 22.5, 15.5, 6.5, 5.5); disc(g, p.f, 22, 14.8, 6, 5);
+    disc(g, p.m, 27, 17, 3.5, 2.5); rectf(g, p.n, 29, 15, 2, 2); rectf(g, p.d, 27, 19, 2, 1);
+    rectf(g, p.n, 24, 13, 2, 2); rectf(g, '#ffffff', 24, 13, 1, 1);
+  } else {
+    disc(g, p.f, 10.5, 5, 2.2); disc(g, p.f, 21.5, 5, 2.2);
+    disc(g, p.s, 16.3, 9.3, 7, 5.5); disc(g, p.f, 16, 8.8, 6.5, 5);
+    rectf(g, p.r, 10, 13, 12, 2); rectf(g, p.rd, 10, 14, 12, 1);
+    disc(g, p.s, 16.5, 19, 10, 7.5); disc(g, p.f, 15.8, 18.2, 9.5, 6.8); disc(g, p.l, 13, 15, 4, 2);
+    const legB = (x, up) => { rectf(g, p.s, x, 24 - up, 6, 6); rectf(g, p.f, x, 24 - up, 4, 5); rectf(g, p.d, x + 1, 28 - up, 4, 2); };
+    legB(8, a > 0 ? 1 : 0); legB(18, a < 0 ? 1 : 0);
+    disc(g, p.l, 16, 25, 2.2, 1.8);
+  }
+  return outlineC(c, p.o);
+}
+const frames3 = fn => [0, 1, 2].map(fn);
+const GIRL = { down: frames3(f => drawGirl('down', f, GP.girl)), up: frames3(f => drawGirl('up', f, GP.girl)), side: frames3(f => drawGirl('side', f, GP.girl)) };
+const MOM = { down: frames3(f => drawGirl('down', f, GP.mom)), up: frames3(f => drawGirl('up', f, GP.mom)), side: frames3(f => drawGirl('side', f, GP.mom)) };
+const BEAR = { down: frames3(f => drawPolarBear('down', f)), up: frames3(f => drawPolarBear('up', f)), side: frames3(f => drawPolarBear('side', f)) };
 
 const blank = n => Array(n).fill('................');
 const SPR = {
@@ -884,130 +983,170 @@ function registerEntities() {
 function removeGate(g) { for (let j = 0; j < 2; j++) for (let i = 0; i < 2; i++) entAt.delete((g.y + j) * W + g.x + i); }
 
 // =====================================================================
-// Tiles (procedural pixel art, cached)
+// Tiles (procedural pixel art at 32×32, cached)
 // =====================================================================
 const tileCache = new Map();
 const GROUND = { meadow: ['#68c04a', '#57a83d', '#86d862'], forest: ['#3f8f3c', '#347a33', '#55a64c'], desert: ['#f1d38a', '#ddb96a', '#fae5ad'], snow: ['#edf3fb', '#d3deec', '#ffffff'], castle: ['#6c6982', '#5e5b74', '#7a7790'] };
 const PATHC = { meadow: ['#dcb978', '#c9a463', '#ead09a'], forest: ['#b8955f', '#a07e4c', '#cfae78'], desert: ['#e2b866', '#c99d4e', '#efcf8a'], snow: ['#c4cfdc', '#aab7c8', '#dde5ee'] };
 function drawGround(g, reg, v) {
-  const [b, d, l] = GROUND[reg]; g.fillStyle = b; g.fillRect(0, 0, 16, 16);
-  const r = mulberry32(v * 977 + reg.length * 31);
-  for (let i = 0; i < 5; i++) {
-    const x = Math.floor(r() * 13), y = Math.floor(r() * 13);
-    if (reg === 'meadow' || reg === 'forest') { g.fillStyle = d; g.fillRect(x, y + 1, 1, 2); g.fillRect(x + 2, y + 1, 1, 2); g.fillRect(x + 1, y, 1, 2); if (r() < .5) { g.fillStyle = l; g.fillRect(x + 1, y, 1, 1); } }
-    else { g.fillStyle = r() < .5 ? d : l; g.fillRect(x, y, 2, 1); }
+  const [b, d, l] = GROUND[reg]; rectf(g, b, 0, 0, 32, 32);
+  const r = mulberry32(v * 977 + reg.length * 31 + 5);
+  g.globalAlpha = 0.5; for (let i = 0; i < 26; i++) rectf(g, r() < .5 ? d : l, r() * 32 | 0, r() * 32 | 0, 1, 1); g.globalAlpha = 1;
+  if (reg === 'meadow' || reg === 'forest') {
+    for (let i = 0; i < 6; i++) {
+      const x = 1 + (r() * 27 | 0), y = 4 + (r() * 26 | 0);
+      rectf(g, d, x, y - 2, 1, 3); rectf(g, d, x + 2, y - 4, 1, 5); rectf(g, d, x + 4, y - 2, 1, 3);
+      if (r() < .7) rectf(g, l, x + 2, y - 4, 1, 1); if (r() < .5) rectf(g, l, x, y - 2, 1, 1);
+    }
+  } else if (reg === 'desert') {
+    for (let i = 0; i < 3; i++) { const x = r() * 24 | 0, y = 3 + (r() * 26 | 0); rectf(g, d, x + 1, y, 6, 1); rectf(g, d, x, y - 1, 1, 1); rectf(g, d, x + 7, y - 1, 1, 1); rectf(g, l, x + 2, y - 1, 4, 1); }
+    for (let i = 0; i < 2; i++) { const x = r() * 29 | 0, y = r() * 29 | 0; rectf(g, '#c9a45a', x, y + 1, 2, 1); rectf(g, '#fff0c8', x, y, 2, 1); }
+  } else if (reg === 'snow') {
+    for (let i = 0; i < 4; i++) { const x = r() * 26 | 0, y = r() * 30 | 0; rectf(g, d, x, y, 5, 1); rectf(g, d, x + 1, y + 1, 3, 1); }
+    for (let i = 0; i < 3; i++) rectf(g, '#ffffff', r() * 31 | 0, r() * 31 | 0, 1, 1);
+    rectf(g, '#bcd0ea', r() * 31 | 0, r() * 31 | 0, 1, 1);
   }
 }
-function drawRoundTree(g, reg) {
-  const dark = reg === 'forest', O = '#173d1c', F = dark ? '#2a7a33' : '#33923b', M = dark ? '#236a2c' : '#2b8034', L = dark ? '#4aa548' : '#5cc356';
-  g.fillStyle = 'rgba(0,0,0,.22)'; g.fillRect(3, 14, 10, 2);
-  g.fillStyle = '#5a3a1e'; g.fillRect(6, 11, 4, 4); g.fillStyle = '#3b2412'; g.fillRect(9, 11, 1, 4);
-  for (let y = 0; y < 13; y++) for (let x = 0; x < 16; x++) {
-    const dx = x - 7.5, dy = y - 6.2, d = Math.sqrt(dx * dx + dy * dy * 1.15);
-    if (d < 7.3) { let c = d > 6.3 ? O : F; if (d <= 6.3) { if (dy > 2.5 && d > 3.5) c = M; if ((x - 5.5) ** 2 + (y - 4) ** 2 < 5) c = L; } g.fillStyle = c; g.fillRect(x, y, 1, 1); }
-  }
-  g.fillStyle = M; [[4, 8], [10, 5], [8, 9], [11, 8], [6, 7]].forEach(([x, y]) => g.fillRect(x, y, 1, 1));
+function drawRoundTree(g, reg, v) {
+  const dark = reg === 'forest';
+  const O = '#163a1c', D = dark ? '#1f5e2a' : '#25733a', F = dark ? '#2c7d35' : '#349a3e', L = dark ? '#4aa548' : '#5cc356', Hc = dark ? '#78c860' : '#8ee07a';
+  disc(g, 'rgba(0,0,0,.25)', 16, 29, 12, 3);
+  rectf(g, '#4a2e16', 12, 19, 8, 11); rectf(g, '#6b4423', 13, 19, 5, 11); rectf(g, '#8a5a30', 13, 20, 1, 9); rectf(g, '#4a2e16', 15, 23, 1, 3);
+  rectf(g, '#4a2e16', 10, 28, 3, 2); rectf(g, '#4a2e16', 19, 28, 3, 2);
+  const c = newC(32, 32), q = c.getContext('2d');
+  const clump = (cx, cy, rx, ry) => {
+    disc(q, D, cx, cy, rx, ry); disc(q, F, cx - 0.8, cy - 1, rx - 1.2, ry - 1.2);
+    disc(q, L, cx - rx * 0.35, cy - ry * 0.4, rx * 0.45, ry * 0.38); rectf(q, Hc, cx - rx * 0.45, cy - ry * 0.6, 2, 1);
+  };
+  [[16, 6, 6, 5], [10, 8, 6, 5.5], [22, 8, 6, 5.5], [8, 14, 6, 6], [24, 14, 6, 6], [16, 15, 10, 7]].forEach(a => clump(...a));
+  if (reg === 'meadow' && v === 1) [[10, 13], [20, 10], [17, 17]].forEach(([x, y]) => { rectf(q, '#e8443a', x, y, 2, 2); rectf(q, '#ffb0a0', x, y, 1, 1); });
+  g.drawImage(outlineC(c, O), 0, 0);
 }
 function drawPine(g) {
-  g.fillStyle = 'rgba(0,0,0,.15)'; g.fillRect(3, 14, 10, 2);
-  g.fillStyle = '#5a3a1e'; g.fillRect(7, 12, 2, 3);
-  for (const [t, b, hw] of [[0, 5, 3], [3, 9, 5], [7, 13, 7]]) {
+  disc(g, 'rgba(40,60,90,.18)', 16, 29, 11, 3);
+  rectf(g, '#4a2e16', 14, 24, 4, 6); rectf(g, '#6b4423', 14, 24, 2, 6);
+  const c = newC(32, 32), q = c.getContext('2d');
+  for (const [t, b, hw] of [[1, 11, 6], [7, 18, 9], [13, 26, 12]]) {
     for (let y = t; y <= b; y++) {
       const w = Math.max(1, Math.round(hw * (y - t + 1) / (b - t + 1)));
-      g.fillStyle = '#123d28'; g.fillRect(8 - w - 1, y, w * 2 + 2, 1);
-      g.fillStyle = '#2d7a4f'; g.fillRect(8 - w, y, w * 2, 1);
-      g.fillStyle = '#4a9a6a'; g.fillRect(8 - w, y, Math.max(1, w - 1), 1);
+      rectf(q, '#1d5a3c', 16 - w, y, w * 2, 1); rectf(q, '#2d7a4f', 16 - w, y, Math.round(w * 1.1), 1); rectf(q, '#4a9a6a', 16 - w, y, Math.max(1, Math.round(w * 0.45)), 1);
     }
-    g.fillStyle = '#ffffff'; g.fillRect(7, t, 2, 1); g.fillRect(8 - hw, b, 2, 1); g.fillRect(6 + hw, b - 1, 2, 1);
+    for (let y = t; y <= t + Math.min(2, b - t); y++) { const w = Math.max(1, Math.round(hw * (y - t + 1) / (b - t + 1))); rectf(q, '#ffffff', 16 - w, y, Math.max(1, w), 1); }
+    rectf(q, '#eef4ff', 16 - hw, b, Math.round(hw * 0.8), 1); rectf(q, '#ffffff', 16 - hw + 1, b - 1, 3, 1); rectf(q, '#ffffff', 16 + hw - 4, b, 3, 1);
   }
+  g.drawImage(outlineC(c, '#0f3022'), 0, 0);
 }
-function drawRock(g) {
-  g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(2, 13, 13, 2);
-  for (let y = 2; y < 15; y++) for (let x = 1; x < 16; x++) {
-    const dx = (x - 8) / 7, dy = (y - 8.5) / 6.2, d = dx * dx + dy * dy;
-    if (d < 1) { let c = d > 0.75 ? '#3e424c' : '#8b909c'; if (d <= 0.75) { if (dy > 0.35) c = '#6d727e'; if ((x - 6) ** 2 + (y - 5.5) ** 2 < 5) c = '#b9bdc7'; } g.fillStyle = c; g.fillRect(x, y, 1, 1); }
-  }
-  g.fillStyle = '#5a5e6a'; g.fillRect(9, 8, 3, 1); g.fillRect(11, 9, 1, 2);
+function drawRock(g, reg) {
+  disc(g, 'rgba(0,0,0,.22)', 16, 27, 13, 3.5);
+  const c = newC(32, 32), q = c.getContext('2d');
+  disc(q, '#6d727e', 16, 17, 13, 10); disc(q, '#8b909c', 15, 15.5, 11.5, 8.5); disc(q, '#a6abb6', 13, 12.5, 7, 5); disc(q, '#c8ccd4', 11, 10.5, 3.5, 2.5);
+  rectf(q, '#5a5e6a', 18, 16, 6, 1); rectf(q, '#5a5e6a', 23, 17, 1, 3); rectf(q, '#5a5e6a', 8, 20, 4, 1);
+  if (reg === 'forest') { disc(q, '#4f8f3a', 10, 8.5, 4.5, 2); rectf(q, '#6fb04a', 8, 7, 3, 1); }
+  if (reg === 'snow') { disc(q, '#ffffff', 15, 8.5, 8.5, 3); rectf(q, '#dfe8f5', 8, 11, 14, 1); }
+  g.drawImage(outlineC(c, '#30343c'), 0, 0);
 }
 function drawFlowers(g, reg, v) {
   const r = mulberry32(v * 131 + 7);
   if (reg === 'forest') {
-    for (let i = 0; i < 2; i++) { const x = 2 + Math.floor(r() * 10), y = 4 + Math.floor(r() * 8);
-      g.fillStyle = '#f3e3c3'; g.fillRect(x + 1, y + 2, 1, 2); g.fillStyle = '#d8403a'; g.fillRect(x, y + 1, 3, 1); g.fillRect(x + 1, y, 1, 1); g.fillStyle = '#fff'; g.fillRect(x, y + 1, 1, 1); }
+    for (let i = 0; i < 3; i++) {
+      const x = 3 + (r() * 22 | 0), y = 6 + (r() * 18 | 0);
+      rectf(g, '#f3e3c3', x + 2, y + 3, 2, 4); rectf(g, '#d6c8a6', x + 3, y + 3, 1, 4);
+      disc(g, '#c83a34', x + 3, y + 2.5, 3.5, 2.2); rectf(g, '#ffffff', x + 1, y + 2, 1, 1); rectf(g, '#ffffff', x + 4, y + 1, 1, 1);
+    }
     return;
   }
-  const cols = [['#ff5d6c', '#ffd23f'], ['#ffd23f', '#ff8a3d'], ['#ffffff', '#ffd23f'], ['#c38bff', '#fff3a0']];
-  for (let i = 0; i < 4; i++) {
-    const [p, c] = cols[Math.floor(r() * 4)], x = 1 + Math.floor(r() * 12), y = 1 + Math.floor(r() * 11);
-    g.fillStyle = '#3e8a30'; g.fillRect(x + 1, y + 3, 1, 2);
-    g.fillStyle = p; g.fillRect(x + 1, y, 1, 1); g.fillRect(x, y + 1, 1, 1); g.fillRect(x + 2, y + 1, 1, 1); g.fillRect(x + 1, y + 2, 1, 1);
-    g.fillStyle = c; g.fillRect(x + 1, y + 1, 1, 1);
+  const cols = [['#ff5d6c', '#ffd23f'], ['#ffd23f', '#ff8a3d'], ['#ffffff', '#ffd23f'], ['#c38bff', '#fff3a0'], ['#7fb3ff', '#ffffff']];
+  for (let i = 0; i < 5; i++) {
+    const [p, cc] = cols[r() * cols.length | 0], x = 2 + (r() * 24 | 0), y = 2 + (r() * 22 | 0);
+    rectf(g, '#2f7a2a', x + 2, y + 4, 1, 4); rectf(g, '#3e9a34', x + 3, y + 6, 2, 1);
+    rectf(g, p, x + 1, y, 3, 5); rectf(g, p, x, y + 1, 5, 3); rectf(g, 'rgba(0,0,0,.15)', x + 1, y + 4, 3, 1);
+    rectf(g, cc, x + 2, y + 2, 1, 1);
   }
 }
 function drawPathT(g, reg, v, mask) {
-  const [b, d, l] = PATHC[reg]; g.fillStyle = b; g.fillRect(0, 0, 16, 16);
+  const [b, d, l] = PATHC[reg]; rectf(g, b, 0, 0, 32, 32);
   const r = mulberry32(v * 53 + 11);
-  for (let i = 0; i < 4; i++) { const x = Math.floor(r() * 14), y = 1 + Math.floor(r() * 13); g.fillStyle = d; g.fillRect(x, y, 2, 1); g.fillStyle = l; g.fillRect(x, y - 1, 1, 1); }
-  g.fillStyle = GROUND[reg][0];
-  for (let i = 0; i < 16; i += 2) {
-    const o = (i * 7 + v) % 3 === 0 ? 2 : 1;
-    if (mask & 1) g.fillRect(i, 0, 2, o); if (mask & 4) g.fillRect(i, 16 - o, 2, o);
-    if (mask & 8) g.fillRect(0, i, o, 2); if (mask & 2) g.fillRect(16 - o, i, o, 2);
+  g.globalAlpha = 0.6; for (let i = 0; i < 18; i++) rectf(g, r() < .5 ? d : l, r() * 32 | 0, r() * 32 | 0, 1, 1); g.globalAlpha = 1;
+  for (let i = 0; i < 4; i++) { const x = 1 + (r() * 27 | 0), y = 2 + (r() * 27 | 0); rectf(g, l, x, y, 3, 1); rectf(g, d, x, y + 1, 3, 1); }
+  const G = GROUND[reg];
+  for (let i = 0; i < 32; i++) {
+    const o = Math.max(1, Math.round(2.2 + Math.sin(i * 0.9 + v) * 1.2 + Math.sin(i * 2.3) * 0.6));
+    if (mask & 1) { rectf(g, G[0], i, 0, 1, o); rectf(g, d, i, o, 1, 1); }
+    if (mask & 4) rectf(g, G[0], i, 32 - o, 1, o);
+    if (mask & 8) { rectf(g, G[0], 0, i, o, 1); rectf(g, d, o, i, 1, 1); }
+    if (mask & 2) rectf(g, G[0], 32 - o, i, o, 1);
   }
 }
 function drawWater(g, frame, mask) {
-  g.fillStyle = '#3b8ee0'; g.fillRect(0, 0, 16, 16);
-  g.fillStyle = '#62acf5';
-  for (let k = 0; k < 3; k++) { const y = 2 + k * 5, x = (k * 5 + frame * 2) % 16; g.fillRect(x, y, 4, 1); g.fillRect((x + 9) % 16, y + 2, 3, 1); }
-  g.fillStyle = '#9fd0ff';
-  if (mask & 1) g.fillRect(0, 2, 16, 1); if (mask & 2) g.fillRect(13, 0, 1, 16); if (mask & 4) g.fillRect(0, 13, 16, 1); if (mask & 8) g.fillRect(2, 0, 1, 16);
-  g.fillStyle = '#d8f0ff';
-  if (mask & 1) g.fillRect(0, 0, 16, 2); if (mask & 2) g.fillRect(14, 0, 2, 16); if (mask & 4) g.fillRect(0, 14, 16, 2); if (mask & 8) g.fillRect(0, 0, 2, 16);
+  rectf(g, '#3584d8', 0, 0, 32, 32);
+  rectf(g, '#2f78c8', 0, 22, 32, 4); rectf(g, '#2f78c8', 6, 8, 10, 2);
+  for (const [x0, y] of [[3, 5], [17, 12], [7, 19], [22, 26], [12, 29]]) {
+    const x = (x0 + frame * 3) % 32;
+    for (const xx of [x, x - 32]) { rectf(g, '#5ea8f2', xx, y, 6, 1); rectf(g, '#9ccfff', xx + 1, y - 1, 4, 1); }
+  }
+  const foam = (x, y, w, h) => rectf(g, '#dff3ff', x, y, w, h), mid = (x, y, w, h) => rectf(g, '#9fd0ff', x, y, w, h);
+  for (let i = 0; i < 32; i++) {
+    const o = 2 + ((i + frame) % 5 === 0 ? 1 : 0);
+    if (mask & 1) { foam(i, 0, 1, o); mid(i, o, 1, 2); }
+    if (mask & 4) { foam(i, 32 - o, 1, o); mid(i, 30 - o, 1, 2); }
+    if (mask & 8) { foam(0, i, o, 1); mid(o, i, 2, 1); }
+    if (mask & 2) { foam(32 - o, i, o, 1); mid(30 - o, i, 2, 1); }
+  }
 }
 function drawBridge(g, mask) {
-  g.fillStyle = '#b07a40'; g.fillRect(0, 0, 16, 16);
-  g.fillStyle = '#d09a5a'; for (let y = 0; y < 16; y += 4) g.fillRect(0, y, 16, 1);
-  g.fillStyle = '#7a4e24'; for (let y = 3; y < 16; y += 4) g.fillRect(0, y, 16, 1);
-  g.fillStyle = '#5a3418'; if (mask & 8) g.fillRect(0, 0, 3, 16); if (mask & 2) g.fillRect(13, 0, 3, 16);
-  g.fillStyle = '#8a5a2a'; if (mask & 8) g.fillRect(1, 0, 1, 16); if (mask & 2) g.fillRect(14, 0, 1, 16);
+  for (let y = 0; y < 32; y += 8) {
+    rectf(g, '#b07a40', 0, y, 32, 7); rectf(g, '#d09a5a', 0, y, 32, 1); rectf(g, '#5a3418', 0, y + 7, 32, 1);
+    rectf(g, '#9a6a34', 6 + (y % 16), y + 3, 7, 1); rectf(g, '#9a6a34', 20 - (y % 16) / 2, y + 5, 5, 1);
+    rectf(g, '#5a3418', 4, y + 3, 1, 1); rectf(g, '#5a3418', 27, y + 3, 1, 1);
+  }
+  if (mask & 8) { rectf(g, '#5a3418', 0, 0, 5, 32); rectf(g, '#8a5a2a', 1, 0, 3, 32); rectf(g, '#a8703a', 1, 0, 1, 32); rectf(g, '#3e2410', 0, 0, 5, 3); rectf(g, '#3e2410', 0, 16, 5, 3); }
+  if (mask & 2) { rectf(g, '#5a3418', 27, 0, 5, 32); rectf(g, '#8a5a2a', 28, 0, 3, 32); rectf(g, '#a8703a', 28, 0, 1, 32); rectf(g, '#3e2410', 27, 0, 5, 3); rectf(g, '#3e2410', 27, 16, 5, 3); }
 }
 function drawCactus(g) {
-  g.fillStyle = 'rgba(0,0,0,.15)'; g.fillRect(4, 14, 9, 2);
-  const parts = [[6, 2, 4, 13], [2, 6, 3, 5], [3, 9, 4, 2], [11, 4, 3, 5], [9, 7, 3, 2]];
-  g.fillStyle = '#1d5a2a'; parts.forEach(([x, y, w, h]) => g.fillRect(x - 1, y - 1, w + 2, h + 2));
-  g.fillStyle = '#3fa04e'; parts.forEach(([x, y, w, h]) => g.fillRect(x, y, w, h));
-  g.fillStyle = '#6fd07a'; g.fillRect(7, 3, 1, 10); g.fillRect(3, 7, 1, 3); g.fillRect(12, 5, 1, 3);
-  g.fillStyle = '#ffe9a8'; [[6, 5], [9, 8], [6, 11], [2, 8], [13, 6]].forEach(([x, y]) => g.fillRect(x, y, 1, 1));
-  g.fillStyle = '#ff7eb6'; g.fillRect(7, 1, 2, 1);
+  disc(g, 'rgba(0,0,0,.18)', 16, 29, 9, 2.5);
+  const c = newC(32, 32), q = c.getContext('2d'), F = '#3fa04e';
+  const rr = (x, y, w, h) => { rectf(q, F, x, y + w / 2, w, h - w / 2); disc(q, F, x + w / 2, y + w / 2, w / 2, w / 2); };
+  rr(12, 3, 8, 27); rr(3, 11, 6, 12); rectf(q, F, 3, 19, 12, 5); rr(23, 7, 6, 12); rectf(q, F, 17, 15, 10, 5);
+  rectf(q, '#6fd07a', 14, 6, 1, 22); rectf(q, '#6fd07a', 5, 13, 1, 8); rectf(q, '#6fd07a', 25, 9, 1, 8);
+  rectf(q, '#2e8a3e', 18, 6, 1, 22); rectf(q, '#2e8a3e', 7, 14, 1, 7); rectf(q, '#2e8a3e', 27, 10, 1, 7);
+  [[13, 10], [19, 14], [13, 20], [19, 24], [4, 16], [27, 12]].forEach(([x, y]) => rectf(q, '#fff3c0', x, y, 1, 1));
+  disc(q, '#ff7eb6', 16, 3, 3, 1.8); rectf(q, '#ffd23f', 16, 2, 1, 1);
+  g.drawImage(outlineC(c, '#1d5a2a'), 0, 0);
 }
-function drawWall(g, topOpen) {
-  if (topOpen) { drawGround(g, 'snow', 0); }
-  const y0 = topOpen ? 4 : 0;
-  g.fillStyle = '#8a8ca4'; g.fillRect(0, y0, 16, 16 - y0);
-  if (topOpen) { g.fillStyle = '#8a8ca4'; g.fillRect(1, 1, 5, 3); g.fillRect(9, 1, 5, 3); g.fillStyle = '#b0b2c6'; g.fillRect(1, 1, 5, 1); g.fillRect(9, 1, 5, 1); }
-  g.fillStyle = '#5c5e76';
-  for (let y = y0; y < 16; y += 4) { g.fillRect(0, y + 3, 16, 1); const off = ((y / 4) | 0) % 2 ? 4 : 0; for (let x = off; x < 16; x += 8) g.fillRect(x, y, 1, 3); }
-  g.fillStyle = '#a8aac0'; for (let y = y0; y < 16; y += 4) g.fillRect(0, y, 16, 1);
+function drawWall(g, topOpen, v) {
+  const y0 = topOpen ? 8 : 0;
+  if (topOpen) {
+    drawGround(g, 'snow', v);
+    for (const mx of [2, 18]) { rectf(g, '#5c5e76', mx - 1, 1, 14, 8); rectf(g, '#8a8ca4', mx, 2, 12, 7); rectf(g, '#ffffff', mx, 1, 12, 2); rectf(g, '#dfe8f5', mx, 3, 12, 1); }
+  }
+  rectf(g, '#5c5e76', 0, y0, 32, 32 - y0);
+  const shades = ['#8a8ca4', '#9294ac', '#83859c'];
+  for (let y = y0, row = 0; y < 32; y += 8, row++) {
+    for (let x = (row % 2) ? -8 : 0; x < 32; x += 16) {
+      const c = shades[(hash2(x + 40, y + v * 7) >>> 3) % 3];
+      rectf(g, c, x + 1, y + 1, 14, 6); rectf(g, '#aeb0c4', x + 1, y + 1, 14, 1); rectf(g, '#6e7088', x + 1, y + 6, 14, 1);
+    }
+  }
 }
 function drawFloorT(g, par) {
-  g.fillStyle = par ? '#6c6982' : '#77748e'; g.fillRect(0, 0, 16, 16);
-  g.fillStyle = '#5a576e'; g.fillRect(0, 15, 16, 1); g.fillRect(15, 0, 1, 16);
-  g.fillStyle = '#8a87a0'; g.fillRect(0, 0, 15, 1);
+  rectf(g, par ? '#6c6982' : '#77748e', 0, 0, 32, 32);
+  rectf(g, '#8a87a0', 0, 0, 31, 1); rectf(g, '#8a87a0', 0, 0, 1, 31);
+  rectf(g, '#55526a', 0, 31, 32, 1); rectf(g, '#55526a', 31, 0, 1, 32);
+  if (par) { rectf(g, '#5e5b74', 8, 12, 5, 1); rectf(g, '#5e5b74', 12, 13, 1, 3); }
 }
 function drawCarpet(g, mask) {
-  g.fillStyle = '#a8283a'; g.fillRect(0, 0, 16, 16);
-  g.fillStyle = '#c23a4c'; for (let y = 2; y < 16; y += 6) g.fillRect(3, y, 10, 2);
-  g.fillStyle = '#e8b84a'; if (mask & 8) g.fillRect(0, 0, 2, 16); if (mask & 2) g.fillRect(14, 0, 2, 16);
+  rectf(g, '#a8283a', 0, 0, 32, 32);
+  for (let y = 4; y < 32; y += 12) { rectf(g, '#c23a4c', 12, y, 8, 2); rectf(g, '#c23a4c', 14, y - 2, 4, 6); }
+  if (mask & 8) { rectf(g, '#e8b84a', 0, 0, 4, 32); rectf(g, '#8a1f2c', 4, 0, 1, 32); rectf(g, '#fff0a0', 1, 0, 1, 32); }
+  if (mask & 2) { rectf(g, '#e8b84a', 28, 0, 4, 32); rectf(g, '#8a1f2c', 27, 0, 1, 32); rectf(g, '#fff0a0', 30, 0, 1, 32); }
 }
 function drawFence(g, mask) {
   const horiz = (mask & 2) === 0 || (mask & 8) === 0 || (mask & 5) === 5, vert = (mask & 1) === 0 || (mask & 4) === 0;
-  g.fillStyle = '#5a3418';
-  if (horiz) { g.fillRect(0, 5, 16, 3); g.fillRect(0, 10, 16, 3); }
-  if (vert) g.fillRect(6, 0, 4, 16);
-  g.fillStyle = '#c8925a';
-  if (horiz) { g.fillRect(0, 6, 16, 1); g.fillRect(0, 11, 16, 1); }
-  if (vert) g.fillRect(7, 0, 2, 16);
-  g.fillStyle = '#5a3418'; g.fillRect(5, 2, 6, 13); g.fillStyle = '#d8a46a'; g.fillRect(6, 3, 4, 11); g.fillStyle = '#a8703a'; g.fillRect(9, 3, 1, 11);
+  if (horiz) for (const y of [10, 20]) { rectf(g, '#5a3418', 0, y, 32, 5); rectf(g, '#c8925a', 0, y + 1, 32, 3); rectf(g, '#e0b07a', 0, y + 1, 32, 1); }
+  if (vert) { rectf(g, '#5a3418', 12, 0, 8, 32); rectf(g, '#c8925a', 13, 0, 6, 32); rectf(g, '#e0b07a', 13, 0, 1, 32); }
+  rectf(g, 'rgba(0,0,0,.2)', 10, 28, 13, 3);
+  rectf(g, '#5a3418', 10, 4, 12, 26); rectf(g, '#d8a46a', 11, 5, 10, 24); rectf(g, '#f0c48a', 11, 5, 2, 24); rectf(g, '#a8703a', 18, 5, 3, 24);
+  rectf(g, '#5a3418', 9, 3, 14, 3); rectf(g, '#e0b07a', 10, 3, 12, 1);
 }
 function nbMask(tx, ty, ok) {
   let m = 0;
@@ -1017,17 +1156,17 @@ function nbMask(tx, ty, ok) {
 function tileRaw(t, reg, v, mask, frame, par) {
   const key = `${t}|${reg}|${v}|${mask}|${frame}|${par}`;
   let c = tileCache.get(key); if (c) return c;
-  c = newC(); const g = c.getContext('2d');
+  c = newC(32, 32); const g = c.getContext('2d');
   switch (t) {
     case T.WATER: drawWater(g, frame, mask); break;
     case T.PATH: drawPathT(g, reg, v, mask); break;
     case T.BRIDGE: drawBridge(g, mask); break;
-    case T.WALL: drawWall(g, mask & 1); break;
+    case T.WALL: drawWall(g, mask & 1, v); break;
     case T.FLOOR: drawFloorT(g, par); break;
     case T.CARPET: drawCarpet(g, mask); break;
     case T.FENCE: drawGround(g, reg, v); drawFence(g, mask); break;
-    case T.TREE: drawGround(g, reg, v); if (reg === 'snow') drawPine(g); else if (reg === 'desert') drawCactus(g); else drawRoundTree(g, reg); break;
-    case T.ROCK: drawGround(g, reg, v); drawRock(g); break;
+    case T.TREE: drawGround(g, reg, v); if (reg === 'snow') drawPine(g); else if (reg === 'desert') drawCactus(g); else drawRoundTree(g, reg, v); break;
+    case T.ROCK: drawGround(g, reg, v); drawRock(g, reg); break;
     case T.FLOWER: drawGround(g, reg, v); drawFlowers(g, reg, v); break;
     case T.CACTUS: drawGround(g, reg, v); drawCactus(g); break;
     default: drawGround(g, reg, v);
@@ -1041,7 +1180,7 @@ function getTile(tx, ty, frame) {
     case T.WATER: return tileRaw(t, '', 0, nbMask(tx, ty, k => k === T.WATER || k === T.BRIDGE), frame, 0);
     case T.PATH: return tileRaw(t, reg, v, nbMask(tx, ty, k => k === T.PATH || k === T.BRIDGE || k === T.CARPET), 0, 0);
     case T.BRIDGE: return tileRaw(t, '', 0, nbMask(tx, ty, k => k === T.BRIDGE), 0, 0);
-    case T.WALL: return tileRaw(t, '', 0, nbMask(tx, ty, k => k === T.WALL) & 1, 0, 0);
+    case T.WALL: return tileRaw(t, '', v, nbMask(tx, ty, k => k === T.WALL) & 1, 0, 0);
     case T.FLOOR: return tileRaw(t, '', 0, 0, 0, (tx + ty) & 1);
     case T.CARPET: return tileRaw(t, '', 0, nbMask(tx, ty, k => k === T.CARPET), 0, 0);
     case T.FENCE: return tileRaw(t, reg, v, nbMask(tx, ty, k => k === T.FENCE), 0, 0);
@@ -1050,26 +1189,41 @@ function getTile(tx, ty, frame) {
 }
 
 function makeHouse() {
-  const c = newC(64, 52), g = c.getContext('2d');
-  g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(3, 47, 62, 5);
-  g.fillStyle = '#2b1b17'; g.fillRect(2, 24, 60, 26); g.fillStyle = '#f4e4c4'; g.fillRect(3, 25, 58, 24);
-  g.fillStyle = '#e0cba4'; for (let y = 30; y < 49; y += 5) g.fillRect(3, y, 58, 1);
-  g.fillStyle = '#8a5a2b'; g.fillRect(3, 25, 2, 24); g.fillRect(59, 25, 2, 24);
-  g.fillStyle = '#2b1b17'; g.fillRect(34, 32, 12, 17); g.fillStyle = '#9a5a2a'; g.fillRect(35, 33, 10, 16);
-  g.fillStyle = '#7a4220'; g.fillRect(39, 33, 2, 16); g.fillStyle = '#ffd23f'; g.fillRect(42, 41, 2, 2);
-  for (const wx of [10, 50]) {
-    g.fillStyle = '#2b1b17'; g.fillRect(wx - 1, 31, 10, 10); g.fillStyle = '#8fd3ff'; g.fillRect(wx, 32, 8, 8);
-    g.fillStyle = '#ffffff'; g.fillRect(wx + 1, 33, 2, 2); g.fillStyle = '#8a5a2b'; g.fillRect(wx + 3, 32, 2, 8); g.fillRect(wx, 35, 8, 2);
-    g.fillStyle = '#ff7eb6'; g.fillRect(wx - 1, 41, 10, 2); g.fillStyle = '#5cc356'; g.fillRect(wx, 40, 2, 1); g.fillRect(wx + 6, 40, 2, 1);
+  const c = newC(128, 104), g = c.getContext('2d');
+  disc(g, 'rgba(0,0,0,.22)', 66, 98, 62, 5);
+  rectf(g, '#2b1b17', 4, 48, 120, 52); rectf(g, '#f4e4c4', 6, 50, 116, 48);
+  for (let y = 58; y < 98; y += 8) { rectf(g, '#e0cba4', 6, y, 116, 1); rectf(g, '#fff4dc', 6, y + 1, 116, 1); }
+  rectf(g, '#8a5a2b', 6, 50, 4, 48); rectf(g, '#8a5a2b', 118, 50, 4, 48); rectf(g, '#a8703a', 7, 50, 1, 48); rectf(g, '#a8703a', 119, 50, 1, 48);
+  // door
+  rectf(g, '#2b1b17', 68, 62, 24, 36); rectf(g, '#9a5a2a', 70, 64, 20, 34);
+  rectf(g, '#b8743a', 72, 66, 7, 13); rectf(g, '#b8743a', 81, 66, 7, 13); rectf(g, '#b8743a', 72, 82, 7, 14); rectf(g, '#b8743a', 81, 82, 7, 14);
+  rectf(g, '#7a4220', 79, 64, 2, 34); rectf(g, '#ffd23f', 84, 80, 3, 3); rectf(g, '#fff6b0', 84, 80, 1, 1);
+  rectf(g, '#c8925a', 66, 96, 28, 3);
+  for (const wx of [20, 100]) {
+    rectf(g, '#2b1b17', wx - 2, 62, 20, 20); rectf(g, '#8fd3ff', wx, 64, 16, 16); rectf(g, '#c8ecff', wx + 1, 65, 5, 2); rectf(g, '#c8ecff', wx + 1, 67, 2, 3);
+    rectf(g, '#8a5a2b', wx + 7, 64, 2, 16); rectf(g, '#8a5a2b', wx, 71, 16, 2);
+    rectf(g, '#2b1b17', wx - 3, 82, 22, 5); rectf(g, '#d86a9a', wx - 2, 83, 20, 3);
+    [[0, '#ff5d6c'], [4, '#ffd23f'], [8, '#ffffff'], [12, '#c38bff'], [16, '#ff5d6c']].forEach(([dx, col]) => { rectf(g, '#3e9a34', wx - 1 + dx, 79, 2, 3); rectf(g, col, wx - 1 + dx, 78, 3, 2); });
   }
-  g.fillStyle = '#2b1b17'; g.fillRect(46, 0, 9, 10); g.fillStyle = '#9a6a5a'; g.fillRect(47, 1, 7, 8);
-  g.fillStyle = '#2b1b17'; g.fillRect(0, 4, 64, 23); g.fillStyle = '#d8483c'; g.fillRect(1, 5, 62, 20);
-  g.fillStyle = '#b03328';
-  for (let y = 9; y < 25; y += 4) { g.fillRect(1, y, 62, 1); for (let x = (y % 8 ? 0 : 4); x < 62; x += 8) g.fillRect(x + 1, y - 3, 1, 3); }
-  g.fillStyle = '#f06a5a'; g.fillRect(1, 5, 62, 2); g.fillStyle = '#8a2a22'; g.fillRect(1, 24, 62, 2);
+  rectf(g, '#2b1b17', 92, 0, 18, 20); rectf(g, '#9a6a5a', 94, 2, 14, 16); rectf(g, '#7a4a3a', 94, 8, 14, 1); rectf(g, '#7a4a3a', 100, 2, 1, 6); rectf(g, '#7a4a3a', 96, 9, 1, 8); rectf(g, '#5a3a2a', 92, 0, 18, 3);
+  rectf(g, '#2b1b17', 0, 8, 128, 46); rectf(g, '#d8483c', 2, 10, 124, 40);
+  for (let y = 18, row = 0; y < 50; y += 8, row++) {
+    rectf(g, '#a8322a', 2, y, 124, 2); rectf(g, '#ea6a5a', 2, y + 2, 124, 1);
+    for (let x = row % 2 ? 0 : 8; x < 124; x += 16) rectf(g, '#b8382e', x + 2, y - 6, 2, 6);
+  }
+  rectf(g, '#f27a6a', 2, 10, 124, 4); rectf(g, '#ffa08f', 2, 10, 124, 1); rectf(g, '#8a2a22', 2, 48, 124, 4);
   return c;
 }
 const HOUSE = makeHouse();
+function makeFountain() {
+  const c = newC(32, 32), g = c.getContext('2d'), s = newC(32, 32), q = s.getContext('2d');
+  disc(g, 'rgba(0,0,0,.22)', 16, 28, 15, 3.5);
+  disc(q, '#8b909c', 16, 20, 15, 9); disc(q, '#b9bdc7', 16, 19, 14, 7.5); disc(q, '#3b8ee0', 16, 19.5, 11.5, 5.5); disc(q, '#62acf5', 14, 18.5, 7, 3);
+  rectf(q, '#8b909c', 14, 6, 4, 14); rectf(q, '#b9bdc7', 14, 6, 2, 14); disc(q, '#b9bdc7', 16, 6, 4.5, 2); disc(q, '#62acf5', 16, 6, 3, 1.2);
+  g.drawImage(outlineC(s, '#3e424c'), 0, 0);
+  return c;
+}
+const FOUNTAIN = makeFountain();
 
 // =====================================================================
 // Game state
@@ -1207,14 +1361,14 @@ function toast(msg, ms = 2400) { const t = $('toast'); t.textContent = msg; t.cl
 
 const bubble = { t: 0, next: 18 };
 const MILES_LINES = ['Let\'s go, {name}! 🐾', 'I smell honey somewhere... 🍯', 'Math makes me strong! 💪', 'I\'m right behind you!',
-  'Grr! ...I mean, hi! 🐻', 'You\'re getting so smart!', 'Adventure time!', 'Is that a treasure chest? 👀'];
-function milesSay(text, dur = 2.8) { const b = $('bubble'); b.textContent = '🐻 ' + text; b.classList.remove('hidden'); bubble.t = dur; }
+  'Grr! ...I mean, hi! 🐻‍❄️', 'You\'re getting so smart!', 'Adventure time!', 'Is that a treasure chest? 👀'];
+function milesSay(text, dur = 2.8) { const b = $('bubble'); b.textContent = '🐻‍❄️ ' + text; b.classList.remove('hidden'); bubble.t = dur; }
 function updateBubble(dt) {
   const b = $('bubble');
   if (bubble.t > 0) {
     bubble.t -= dt;
     if (bubble.t <= 0 || mode !== 'world') { b.classList.add('hidden'); bubble.t = 0; }
-    else { b.style.left = ((miles.x - cam.x) * SCALE / DPR) + 'px'; b.style.top = ((miles.y - 20 - cam.y) * SCALE / DPR) + 'px'; }
+    else { b.style.left = ((miles.x - cam.x) * RES * SCALE / DPR) + 'px'; b.style.top = ((miles.y - 20 - cam.y) * RES * SCALE / DPR) + 'px'; }
   } else if (mode === 'world' && !dlg.active && !menuOpen) {
     bubble.next -= dt;
     if (bubble.next <= 0) { bubble.next = 22 + R() * 18; milesSay(fillName(pick(MILES_LINES))); }
@@ -1250,8 +1404,8 @@ $('dialog').addEventListener('pointerdown', e => { e.preventDefault(); e.stopPro
 // =====================================================================
 function resetTrail() {
   trail.length = 0;
-  miles.x = player.x; miles.y = player.y - 2;
-  for (let i = 0; i < 10; i++) trail.push({ x: player.x, y: player.y });
+  miles.x = player.x - 14; miles.y = player.y; miles.dir = 'right';
+  for (let i = 0; i < 10; i++) trail.push({ x: miles.x, y: miles.y });
 }
 function respawn() { player.x = S.cp.x; player.y = S.cp.y; player.dir = 'down'; resetTrail(); updateCamera(); }
 function trailPush() {
@@ -1348,10 +1502,10 @@ function openChest(c) {
   burst(c.x * TS + 8, c.y * TS + 6, 24, ['#ffd23f', '#ffffff', '#ff9a3d'], { speed: 70, up: 40, star: true });
   if (c.crown) {
     S.won = true; save();
-    say([['', 'You open the royal treasure chest...'], ['', '✨ You found the GOLDEN CROWN OF NUMBERS! ✨'], ['🐻 Miles', 'We did it, {name}! You\'re the smartest adventurer in the whole kingdom!']], showVictory);
+    say([['', 'You open the royal treasure chest...'], ['', '✨ You found the GOLDEN CROWN OF NUMBERS! ✨'], ['🐻‍❄️ Miles', 'We did it, {name}! You\'re the smartest adventurer in the whole kingdom!']], showVictory);
     return;
   }
-  if (c.honey) { S.honey += c.honey; say([['', `You found ${c.honey} honey pots! ${'🍯'.repeat(c.honey)}`], ['🐻 Miles', 'Yum! Honey makes my hints extra good. Tap "Miles, help!" in a battle!']]); }
+  if (c.honey) { S.honey += c.honey; say([['', `You found ${c.honey} honey pots! ${'🍯'.repeat(c.honey)}`], ['🐻‍❄️ Miles', 'Yum! Honey makes my hints extra good. Tap "Miles, help!" in a battle!']]); }
   if (c.heart) { S.maxHearts = Math.min(9, S.maxHearts + 1); S.hearts = S.maxHearts; say([['', 'You found a HEART CONTAINER! Your max hearts went up by one! ❤️']]); }
   save(); updateHud();
 }
@@ -1382,7 +1536,7 @@ function renderEnemyBar() {
 function updateBattleHud() {
   $('bHearts').textContent = heartStr();
   $('bStreak').textContent = battle && battle.streak >= 2 ? `🔥 ${battle.streak} in a row!` : `Math Lv ${lvlNum()}`;
-  $('btnHelp').textContent = S.honey > 0 ? `🐻 Miles, help! (🍯 ${S.honey})` : '🐻 Miles, any tips?';
+  $('btnHelp').textContent = S.honey > 0 ? `🐻‍❄️ Miles, help! (🍯 ${S.honey})` : '🐻‍❄️ Miles, any tips?';
 }
 function nextQuestion() {
   if (!battle) return;
@@ -1417,7 +1571,7 @@ function choose(i, btn) {
     btn.classList.add('correct'); b.streak++; S.stars++;
     recordAnswer(true, ms, q.level, b.helped);
     const pounce = b.streak >= 3 && b.streak % 3 === 0;
-    $('bFeedback').innerHTML = `<span class="good">${pounce ? '🐻 MILES BEAR POUNCE! Double damage!' : pick(PRAISE)}</span>`;
+    $('bFeedback').innerHTML = `<span class="good">${pounce ? '🐻‍❄️ MILES BEAR POUNCE! Double damage!' : pick(PRAISE)}</span>`;
     sfx('correct'); if (pounce) sfx('pounce');
     b.anim = { type: pounce ? 'pounce' : 'attack', t: 0, dmg: pounce ? 2 : 1 };
   } else {
@@ -1438,17 +1592,17 @@ function milesHelp() {
     S.honey--; sfx('help');
     const btns = [...$('bChoices').children];
     shuffle(btns.map((_, i) => i).filter(i => q.choices[i] !== q.answer)).slice(0, 2).forEach(i => btns[i].classList.add('gone'));
-    $('bFeedback').innerHTML = `🐻 <b>Miles:</b> ${q.hint || 'You can do it!'}<br><small>(I took away two wrong answers!)</small>${q.hintVisual ? `<div class="hv">${q.hintVisual}</div>` : ''}`;
+    $('bFeedback').innerHTML = `🐻‍❄️ <b>Miles:</b> ${q.hint || 'You can do it!'}<br><small>(I took away two wrong answers!)</small>${q.hintVisual ? `<div class="hv">${q.hintVisual}</div>` : ''}`;
   } else {
     sfx('blip');
-    $('bFeedback').innerHTML = `🐻 <b>Miles:</b> I'm out of honey, but here's a tip: ${q.hint || 'Take your time!'}${q.hintVisual ? `<div class="hv">${q.hintVisual}</div>` : ''}`;
+    $('bFeedback').innerHTML = `🐻‍❄️ <b>Miles:</b> I'm out of honey, but here's a tip: ${q.hint || 'Take your time!'}${q.hintVisual ? `<div class="hv">${q.hintVisual}</div>` : ''}`;
   }
   $('btnHelp').classList.add('hidden'); updateHud(); updateBattleHud(); save();
 }
 function battleSceneH() {
   const ui = $('battleUI');
   const top = ui.classList.contains('hidden') ? innerHeight : ui.getBoundingClientRect().top;
-  return Math.max(60, top * DPR / SCALE);
+  return Math.max(60, top * DPR / (SCALE * RES));
 }
 function updateBattle(dt) {
   const b = battle; if (!b) return;
@@ -1491,7 +1645,7 @@ function winBattle() {
 function loseBattle() {
   battle.anim = { type: 'lose', t: 0 };
   $('bQuestion').innerHTML = 'Oh no! Out of hearts!'; $('bChoices').innerHTML = ''; $('bVisual').innerHTML = '';
-  $('bFeedback').innerHTML = '🐻 Miles scoops you up and carries you somewhere safe...';
+  $('bFeedback').innerHTML = '🐻‍❄️ Miles scoops you up and carries you somewhere safe...';
   sfx('lose');
 }
 function closeBattle() {
@@ -1504,7 +1658,7 @@ function endBattleWin() {
   if (b.mon) { b.mon.alive = false; b.mon.respawn = 45; }
   if (b.gate) {
     S.gates[b.gate.id] = true; removeGate(b.gate); save();
-    const after = b.gate.id === 'dragon' ? () => say([['🐻 Miles', 'We did it! The treasure must be inside the castle. Let\'s go!']]) : null;
+    const after = b.gate.id === 'dragon' ? () => say([['🐻‍❄️ Miles', 'We did it! The treasure must be inside the castle. Let\'s go!']]) : null;
     say(b.gate.outro.map(l => [b.gate.name, l]), after);
   }
 }
@@ -1512,7 +1666,7 @@ function endBattleLose() {
   const b = battle; closeBattle();
   if (b.mon) b.mon.stun = 4;
   S.hearts = S.maxHearts; respawn(); save(); updateHud();
-  say([['🐻 Miles', 'Don\'t worry, {name}! Every mistake makes your brain stronger. Let\'s rest up and try again!']]);
+  say([['🐻‍❄️ Miles', 'Don\'t worry, {name}! Every mistake makes your brain stronger. Let\'s rest up and try again!']]);
 }
 function runAway() {
   const b = battle; if (!b || b.locked) return;
@@ -1541,8 +1695,8 @@ function updateParts(dt) {
 function drawParts(g, ox, oy) {
   for (const p of parts) {
     g.globalAlpha = Math.min(1, p.life / p.max * 2); g.fillStyle = p.c;
-    const x = Math.round(p.x - ox), y = Math.round(p.y - oy);
-    if (p.star) { g.fillRect(x - 1, y, 3, 1); g.fillRect(x, y - 1, 1, 3); } else g.fillRect(x, y, p.sz, p.sz);
+    const x = snap(p.x - ox), y = snap(p.y - oy);
+    if (p.star) { g.fillRect(x - 1, y, 2.5, 0.5); g.fillRect(x, y - 1, 0.5, 2.5); } else g.fillRect(x, y, p.sz, p.sz);
   }
   g.globalAlpha = 1;
 }
@@ -1551,8 +1705,8 @@ function drawSnow(g, dt) {
   g.fillStyle = 'rgba(255,255,255,.9)';
   for (const f of flakes) {
     f.y += f.s * dt * 0.09; f.ph += dt; if (f.y > 1) { f.y = 0; f.x = R(); }
-    const x = ((f.x * BW + Math.sin(f.ph) * 6) % BW + BW) % BW, sz = f.s > 0.7 ? 2 : 1;
-    g.fillRect(x | 0, (f.y * BH) | 0, sz, sz);
+    const x = ((f.x * BW + Math.sin(f.ph) * 6) % BW + BW) % BW, sz = f.s > 0.7 ? 1 : 0.5;
+    g.fillRect(snap(x), snap(f.y * BH), sz, sz);
   }
 }
 
@@ -1564,49 +1718,50 @@ function charSprite(set, dir, moving, anim) {
   const arr = dir === 'up' ? set.up : dir === 'down' ? set.down : set.side;
   return { s: arr[f], flip: dir === 'left', bob: f === 1 || f === 2 ? -1 : 0 };
 }
-function shadow(g, x, y, w = 5) { g.fillStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.ellipse(Math.round(x), Math.round(y), w, 2, 0, 0, Math.PI * 2); g.fill(); }
+function shadow(g, x, y, w = 5) { g.fillStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.ellipse(snap(x), snap(y), w, 2, 0, 0, Math.PI * 2); g.fill(); }
 function drawMark(g, x, y) {
   const by = Math.round(y + Math.sin(time * 5) * 1.5);
   g.fillStyle = '#2b1b17'; g.fillRect(x - 2, by - 1, 5, 9);
   g.fillStyle = '#ffd84a'; g.fillRect(x - 1, by, 3, 4); g.fillRect(x - 1, by + 5, 3, 2);
 }
 function drawMonster(g, m, x, y, sc = 1, overworld = true) {
-  const s = SPR[m.kind];
+  const s = overworld ? SPR[m.kind] : hi(SPR[m.kind]), ss = s.width / SPR[m.kind].width;
   if (m.kind === 'bat') {
     const fly = Math.sin(m.ph * 8) > 0;
     const yy = y - (overworld ? 6 : 0) + Math.sin(m.ph * 3) * 2 * sc;
-    g.save(); g.translate(Math.round(x), Math.round(yy)); g.scale(sc, sc * (fly ? 1 : 0.75));
-    g.drawImage(s, -8, -12); g.restore();
+    g.save(); g.translate(snap(x), snap(yy)); g.scale(sc, sc * (fly ? 1 : 0.75));
+    g.drawImage(s, -8, -12, 16, 16); g.restore();
   } else if (m.kind === 'slime' || m.kind === 'ice') {
     const q = 1 + Math.sin(m.ph * 6) * 0.1;
-    g.save(); g.translate(Math.round(x), Math.round(y)); g.scale(sc / q, sc * q); g.drawImage(s, -8, -16); g.restore();
+    g.save(); g.translate(snap(x), snap(y)); g.scale(sc / q, sc * q); g.drawImage(s, -8, -16, 16, 16); g.restore();
   } else {
     const bob = Math.round(Math.abs(Math.sin(m.ph * 4)) * -1 * sc);
-    drawSpr(g, s, x - 8 * sc, y - 16 * sc + bob, Math.sin(m.ph * 0.7) > 0, sc);
+    drawSpr(g, s, x - 8 * sc, y - 16 * sc + bob, Math.sin(m.ph * 0.7) > 0, sc / ss);
   }
 }
 function renderWorld(dt) {
-  const g = bctx, cx = Math.round(cam.x), cy = Math.round(cam.y), frame = Math.floor(time * 2) % 4;
+  const g = bctx, cx = snap(cam.x), cy = snap(cam.y), frame = Math.floor(time * 2) % 4;
+  g.setTransform(RES, 0, 0, RES, 0, 0);
   g.fillStyle = '#000'; g.fillRect(0, 0, BW, BH);
   const tx0 = Math.floor(cx / TS), ty0 = Math.floor(cy / TS), tx1 = Math.ceil((cx + BW) / TS), ty1 = Math.ceil((cy + BH) / TS);
-  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) g.drawImage(getTile(tx, ty, frame), tx * TS - cx, ty * TS - cy);
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) g.drawImage(getTile(tx, ty, frame), tx * TS - cx, ty * TS - cy, TS, TS);
 
   const list = [];
   const vis = (x, y) => x > cx - 40 && x < cx + BW + 40 && y > cy - 40 && y < cy + BH + 60;
-  list.push({ y: 46 * TS, d: () => g.drawImage(HOUSE, 36 * TS - cx, 43 * TS - 5 - cy) });
+  list.push({ y: 46 * TS, d: () => g.drawImage(HOUSE, 36 * TS - cx, 43 * TS - 5 - cy, 64, 52) });
   for (const f of FOUNTAINS) if (vis(f.x * TS, f.y * TS)) list.push({ y: (f.y + 1) * TS, d: () => drawFountain(g, f.x * TS - cx, f.y * TS - cy) });
   for (const c of CHESTS) if (vis(c.x * TS, c.y * TS)) list.push({ y: (c.y + 1) * TS - 1, d: () => {
     const spr = S.chests[c.id] ? SPR.chestOpen : (c.crown ? SPR.crown : SPR.chest);
-    g.drawImage(spr, c.x * TS - cx, c.y * TS - cy);
-    if (!S.chests[c.id] && Math.floor(time * 2 + c.x) % 3 === 0) { g.fillStyle = '#fff'; g.fillRect(c.x * TS - cx + 12, c.y * TS - cy + 4, 1, 1); }
+    g.drawImage(spr, c.x * TS - cx, c.y * TS - cy, TS, TS);
+    if (!S.chests[c.id] && Math.floor(time * 2 + c.x) % 3 === 0) { g.fillStyle = '#fff'; g.fillRect(c.x * TS - cx + 12, c.y * TS - cy + 4, 0.5, 0.5); g.fillRect(c.x * TS - cx + 11.5, c.y * TS - cy + 4.5, 1.5, 0.5); }
   } });
-  for (const s of SIGNS) if (vis(s.x * TS, s.y * TS)) list.push({ y: (s.y + 1) * TS - 1, d: () => g.drawImage(SPR.sign, s.x * TS - cx, s.y * TS - cy) });
+  for (const s of SIGNS) if (vis(s.x * TS, s.y * TS)) list.push({ y: (s.y + 1) * TS - 1, d: () => g.drawImage(SPR.sign, s.x * TS - cx, s.y * TS - cy, TS, TS) });
   const near = (x, y) => Math.hypot(player.x - x, player.y - y) < 3 * TS;
   for (const n of NPCS) if (vis(n.x * TS, n.y * TS)) list.push({ y: (n.y + 1) * TS - 1, d: () => {
     const px = n.x * TS - cx, py = n.y * TS - cy;
     shadow(g, px + 8, py + 15);
     if (n.spr === 'mom') { const face = Math.floor(time / 3) % 2 ? MOM.down[0] : MOM.side[0]; drawSpr(g, face, px, py - 1, Math.floor(time / 3) % 4 === 1); }
-    else g.drawImage(SPR.owl, px, py - 1 + Math.round(Math.sin(time * 3) * 0.6));
+    else g.drawImage(SPR.owl, px, py - 1 + snap(Math.sin(time * 3) * 0.6), TS, TS);
     if (near(n.x * TS + 8, n.y * TS + 8)) drawMark(g, px + 8, py - 12);
   } });
   for (const gt of GATES) if (!S.gates[gt.id] && vis(gt.x * TS, gt.y * TS)) list.push({ y: (gt.y + 2) * TS - 1, d: () => {
@@ -1635,36 +1790,35 @@ function renderWorld(dt) {
   if (creg === 'forest') { g.fillStyle = 'rgba(10,40,20,.12)'; g.fillRect(0, 0, BW, BH); }
 }
 function drawFountain(g, x, y) {
-  g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(x + 1, y + 13, 15, 3);
-  g.fillStyle = '#3e424c'; g.fillRect(x, y + 6, 16, 10); g.fillStyle = '#b9bdc7'; g.fillRect(x + 1, y + 7, 14, 8);
-  g.fillStyle = '#4aa8ff'; g.fillRect(x + 2, y + 8, 12, 5);
-  g.fillStyle = '#bfe9ff'; g.fillRect(x + 3 + (Math.floor(time * 4) % 8), y + 10, 2, 1);
-  g.fillStyle = '#8b909c'; g.fillRect(x + 7, y + 3, 2, 7); g.fillStyle = '#3e424c'; g.fillRect(x + 6, y + 2, 4, 1);
-  g.fillStyle = '#d8f4ff';
-  for (let i = 0; i < 5; i++) { const a = (time * 3 + i * 0.4) % 2, dx = (i % 2 ? 1 : -1) * a * 3, dy = -4 * a + 3 * a * a; g.fillRect(Math.round(x + 8 + dx), Math.round(y + 2 + dy), 1, 1); }
-  if (Math.floor(time * 3) % 2) { g.fillStyle = '#ffffff'; g.fillRect(x + 13, y + 3, 1, 1); g.fillRect(x + 2, y + 4, 1, 1); }
+  g.drawImage(FOUNTAIN, x, y, TS, TS);
+  g.fillStyle = '#bfe9ff'; g.fillRect(x + 4 + (Math.floor(time * 4) % 8) / 2 * 1.5, y + 9.5, 1.5, 0.5);
+  g.fillStyle = '#e8f8ff';
+  for (let i = 0; i < 8; i++) { const a = (time * 2.4 + i * 0.25) % 2, dx = (i % 2 ? 1 : -1) * a * 2.6, dy = -4 * a + 3.2 * a * a; g.fillRect(snap(x + 7.75 + dx), snap(y + 2.5 + dy), 0.5, 0.5); }
+  if (Math.floor(time * 3) % 2) { g.fillStyle = '#ffffff'; g.fillRect(x + 13, y + 3, 0.5, 0.5); g.fillRect(x + 2.5, y + 5, 0.5, 0.5); }
 }
 
 const BATTLE_SKY = { meadow: ['#7fd0ff', '#d4f1ff'], forest: ['#2e6a4a', '#8ccf9a'], desert: ['#ff9f5a', '#ffe7a8'], snow: ['#8aa8e0', '#eef4ff'], castle: ['#1e1236', '#5a3a6a'] };
 function renderBattle(dt) {
   const g = bctx, b = battle, sh = battleSceneH();
   const shake = b.shake > 0 ? Math.round((R() - .5) * 5) : 0;
+  g.setTransform(RES, 0, 0, RES, 0, 0);
   g.save(); g.translate(shake, 0);
   const [s1, s2] = BATTLE_SKY[b.reg] || BATTLE_SKY.meadow, hor = Math.round(sh * 0.38);
   const grad = g.createLinearGradient(0, 0, 0, hor); grad.addColorStop(0, s1); grad.addColorStop(1, s2);
   g.fillStyle = grad; g.fillRect(-8, 0, BW + 16, hor + 1);
   if (b.reg === 'castle') {
-    for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.WALL, '', 0, 0, 0, 0), x, hor - 16), g.drawImage(tileRaw(T.WALL, '', 0, 0, 0, 0), x, hor - 32);
+    for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.WALL, '', 0, 0, 0, 0), x, hor - 16, 16, 16), g.drawImage(tileRaw(T.WALL, '', 0, 0, 0, 0), x, hor - 32, 16, 16);
     for (let x = 24; x < BW; x += 64) { g.fillStyle = '#5a3418'; g.fillRect(x, hor - 22, 2, 6); g.fillStyle = Math.floor(time * 8 + x) % 2 ? '#ffb020' : '#ff6020'; g.fillRect(x - 1, hor - 26, 4, 4); }
-    for (let y = hor; y < BH; y += 16) for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.FLOOR, '', 0, 0, 0, ((x + y) / 16) & 1), x, y);
+    for (let y = hor; y < BH; y += 16) for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.FLOOR, '', 0, 0, 0, ((x + y) / 16) & 1), x, y, 16, 16);
   } else {
     if (b.reg === 'meadow' || b.reg === 'desert') { g.fillStyle = 'rgba(255,255,255,.85)'; const cx = (time * 4) % (BW + 60) - 30; g.fillRect(cx, hor * 0.3, 22, 5); g.fillRect(cx + 5, hor * 0.3 - 3, 12, 3); }
     const treeT = b.reg === 'desert' ? T.CACTUS : T.TREE;
-    for (let x = -8; x < BW + 16; x += 14) g.drawImage(tileRaw(treeT, b.reg, 0, 0, 0, 0), x, hor - 14 + ((x / 14) & 1) * 2);
-    for (let y = hor; y < BH; y += 16) for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.GRASS, b.reg, ((x / 16) + (y / 16)) & 3, 0, 0, 0), x, y);
+    for (let x = -8; x < BW + 16; x += 14) g.drawImage(tileRaw(treeT, b.reg, 0, 0, 0, 0), x, hor - 14 + ((x / 14) & 1) * 2, 16, 16);
+    for (let y = hor; y < BH; y += 16) for (let x = -16; x < BW + 16; x += 16) g.drawImage(tileRaw(T.GRASS, b.reg, ((x / 16) + (y / 16)) & 3, 0, 0, 0), x, y, 16, 16);
   }
 
-  const es = clamp(Math.floor(sh * 0.45 / 16) + (b.boss ? 1 : 0), 2, 8), hs = clamp(Math.floor(sh * 0.3 / 16), 1, 5);
+  const es = clamp(Math.floor(Math.min(sh * 0.45, BW * 0.34) / 8) / 2 + (b.boss ? 1 : 0), 2, 8);
+  const hs = clamp(Math.floor(Math.min(sh * 0.3, BW * 0.16) / 8) / 2, 1, 4);
   const a = b.anim, at = a ? a.t : 0;
   let heroDX = 0, milesDX = 0, enemyDX = 0;
   const lunge = (t0, t1, dist) => at < t0 ? (at / t0) * dist : at < t1 ? (1 - (at - t0) / (t1 - t0)) * dist : 0;
@@ -1679,10 +1833,10 @@ function renderBattle(dt) {
     if (!blink) {
       const m = { kind: b.kind, ph: b.t };
       if (b.boss) {
-        let spr = SPR[b.kind]; if (b.flash > 0 && Math.floor(b.flash * 20) % 2) spr = tinted(spr, '#ffffff');
-        drawSpr(g, spr, ex - 8 * es, ey - 16 * es + Math.round(Math.sin(b.t * 2) * es * 0.5) + b.dying * 20, true, es);
+        let spr = hi(SPR[b.kind]); if (b.flash > 0 && Math.floor(b.flash * 20) % 2) spr = tinted(spr, '#ffffff');
+        drawSpr(g, spr, ex - 8 * es, ey - 16 * es + Math.round(Math.sin(b.t * 2) * es * 0.5) + b.dying * 20, true, es / 2);
       } else if (b.flash > 0 && Math.floor(b.flash * 20) % 2) {
-        drawSpr(g, tinted(SPR[b.kind], '#ffffff'), ex - 8 * es, ey - 16 * es, false, es);
+        drawSpr(g, tinted(hi(SPR[b.kind]), '#ffffff'), ex - 8 * es, ey - 16 * es, false, es / 2);
       } else drawMonster(g, m, ex, ey - (b.kind === 'bat' ? es * 4 : 0) + b.dying * 20, es, false);
     }
   }
@@ -1744,13 +1898,13 @@ function startGame(isNew) {
   mode = 'world'; menuOpen = false; respawn(); setSong('world'); updateHud();
   movedOnce = false; $('touchHint').classList.remove('hidden');
   if (isNew) say([
-    ['🐻 Miles', 'Hi {name}! It\'s me, Miles Bear! 🐻'],
-    ['🐻 Miles', 'They say the Golden Crown of Numbers is hidden in the Number Dragon\'s castle, way up north.'],
-    ['🐻 Miles', 'Monsters around here LOVE math puzzles. Answer them right to win battles!'],
-    ['🐻 Miles', 'If you get stuck, tap "Miles, help!" and I\'ll give you a hint. Honey makes me extra smart! 🍯'],
-    ['🐻 Miles', 'Let\'s say bye to Mom, then head north to the bridge!'],
+    ['🐻‍❄️ Miles', 'Hi {name}! It\'s me, Miles the polar bear! 🐻‍❄️'],
+    ['🐻‍❄️ Miles', 'They say the Golden Crown of Numbers is hidden in the Number Dragon\'s castle, way up north.'],
+    ['🐻‍❄️ Miles', 'Monsters around here LOVE math puzzles. Answer them right to win battles!'],
+    ['🐻‍❄️ Miles', 'If you get stuck, tap "Miles, help!" and I\'ll give you a hint. Honey makes me extra smart! 🍯'],
+    ['🐻‍❄️ Miles', 'Let\'s say bye to Mom, then head north to the bridge!'],
   ]);
-  else toast(`Welcome back, ${S.name}! 🐻`);
+  else toast(`Welcome back, ${S.name}! 🐻‍❄️`);
 }
 function toggleMenu() {
   if (mode === 'battle' || dlg.active) return;
@@ -1781,7 +1935,7 @@ function showVictory() {
   $('winStats').innerHTML = `${S.name} and Miles saved the Kingdom of Numbers!<br>⭐ ${S.stars} stars · ✅ ${S.correct} problems solved (${acc}%)<br>Math Lv <b>${lvlNum()}</b>: ${LEVELS[lvlNum() - 1].name}`;
   $('victory').classList.remove('hidden'); sfx('win');
 }
-$('vKeep').addEventListener('click', () => { $('victory').classList.add('hidden'); $('hud').classList.remove('hidden'); mode = 'world'; toast('Keep exploring! Monsters still want math battles. 🐻'); });
+$('vKeep').addEventListener('click', () => { $('victory').classList.add('hidden'); $('hud').classList.remove('hidden'); mode = 'world'; toast('Keep exploring! Monsters still want math battles. 🐻‍❄️'); });
 $('vNew').addEventListener('click', () => { $('victory').classList.add('hidden'); mode = 'title'; $('nameIn').value = S.name; showGradePick('new'); });
 document.addEventListener('visibilitychange', () => { if (!AU.ctx) return; if (document.hidden) AU.ctx.suspend(); else AU.ctx.resume(); });
 
@@ -1813,7 +1967,7 @@ function loop(now) {
   updateParts(dt);
   updateBubble(dt);
   if (mode === 'battle' && battle) renderBattle(dt); else renderWorld(dt);
-  ctx.drawImage(buf, 0, 0, BW * SCALE, BH * SCALE);
+  ctx.drawImage(buf, 0, 0, buf.width * SCALE, buf.height * SCALE);
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
